@@ -1,250 +1,364 @@
 #include "M5CoreInk.h"
+#include "Numbers_55x40.h"
 #include <Adafruit_NeoPixel.h>
-#include "TimeFunctions.h"
 
-Ink_Sprite PageSprite(&M5.M5Ink);
+image_t num55[11] = {
+  {40, 55, 1, image_num_01}, {40, 55, 1, image_num_02},
+  {40, 55, 1, image_num_03}, {40, 55, 1, image_num_04},
+  {40, 55, 1, image_num_05}, {40, 55, 1, image_num_06},
+  {40, 55, 1, image_num_07}, {40, 55, 1, image_num_08},
+  {40, 55, 1, image_num_09}, {40, 55, 1, image_num_10},
+  {24, 55, 1, image_num_11},
+};
+
+Ink_Sprite TimePageSprite (&M5.M5Ink);
+Ink_Sprite TimeSprite     (&M5.M5Ink);
 
 RTC_TimeTypeDef RTCtime, RTCTimeSave;
 RTC_TimeTypeDef AlarmTime;
 uint8_t second = 0, minutes = 0;
 
-const int STATE_DEFAULT = 0;
-const int STATE_EDIT_HOURS = 1;
-const int STATE_EDIT_MINUTES = 2;
-const int STATE_ALARM = 4;
-const int STATE_ALARM_FINISHED = 5;
+// state constants:
+const int STATE_DEFAULT       = 0;          // DEFAULT CONSTANT
+const int STATE_ALARM         = 1;          // ALARM   CONSTANT
+const int STATE_REST          = 2;          // REST    CONSTANT
+
+// pin constants:
+const int input1Pin           = 26;         // top connector pin G26
+const int rgbOutputPin        = 32;         // bottom connector pin G32
+
+// program state:
 int program_state = STATE_DEFAULT;
 
-unsigned long rtcTimer = 0;
+// timers:
+unsigned long rtc_timer       = 0;          // real-time clock 
+unsigned long alarm_timer     = 0;          // timer for Alarm
+unsigned long ambient_timer   = 0;          // timer for Ambient Lighting
+unsigned long input_timer     = 0;          // timer for Reading Inputs
 
-unsigned long underlineTimer = 0;
-bool underlineOn = false;
+// variables for the input pin states:
+int input1State               = HIGH;
+int armLedVal                 = 0;          // Alarm LED brightness value
+int ambLed1Val                = 0;          // Ambient LED brightness value
+int ambLed2Val                = 0;          // Ambient LED brightness value
+int ambLed3Val                = 0;          // Ambient LED brightness value
 
-unsigned long ledBlinkTimer = 0;
-bool ledBlinkOn = false;
+bool ambientOn                = true;       // Ambient Lighting ON/OFF
+bool alarmMax                 = false;      // LED alarm Max
+bool led1Max                  = false;      // LED 1 Max
+bool led2Max                  = false;      // LED 2 Max
+bool led3Max                  = false;      // LED 3 Max
+bool led1Start                = true;       // LED 1 ON/OFF
+bool led2Start                = false;      // LED 2 ON/OFF
+bool led3Start                = false;      // LED 3 ON/OFF
 
-const int sensorPin = 33;  // 4-wire bottom connector input pin used by M5 units
-int sensorVal = 0;
-unsigned long sensorTimer = 0;
-int brightnessVal = 0;
 
-const int rgbledPin = 32; 
 
+// pixels object to control the RGB LED Unit:
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(
-    3, // number of LEDs
-    rgbledPin, // pin number
-    NEO_GRB + NEO_KHZ800);  // LED type
+                             3,                   // number of RGB LEDs
+                             rgbOutputPin,        // pin the RGB LED Unit is connected to
+                             NEO_GRB + NEO_KHZ800 // LED type
+                           );
 
 void setup() {
-  M5.begin();
-  Serial.begin(9600);
+  pinMode(input1Pin, INPUT_PULLUP);
+
+  M5.begin();                                     // initialize the M5 board
+  pixels.begin();                                 // initialize the NeoPixel library
+  Serial.begin(9600);                             // open Serial port at 9600 bit per second
 
   M5.rtc.GetTime(&RTCTimeSave);
   AlarmTime = RTCTimeSave;
-  AlarmTime.Minutes = AlarmTime.Minutes + 2;  // set alarm 2 minutes ahead 
+  AlarmTime.Minutes = AlarmTime.Minutes + 2;      // set alarm 2 minutes ahead
   M5.update();
-  
+
   M5.M5Ink.clear();
   delay(500);
 
   checkRTC();
-  PageSprite.creatSprite(0, 0, 200, 200);
-  drawTime();
+
+  TimePageSprite.creatSprite(0, 0, 200, 200);
+  drawTimePage();
   
-  pixels.begin();           // initialize NeoPixel strip object 
-  pixels.show();            // turn OFF all pixels 
-  pixels.setBrightness(50); // set brightness to about 1/5 (max = 255)
 }
 
 void loop() {
-  // check if data has been received on the Serial port:
-  if(Serial.available() > 0)
+
+  if (Serial.available() > 0)
   {
-    // input format is "hh:mm" 
-    char input[6];
-    int charsRead = Serial.readBytes(input, 6);    // read 6 characters 
-    if(charsRead == 6 && input[2] == ':') {
-      int mm = int(input[4] - '0') + int(input[3] - '0')*10; 
+    // OLD input format is "hh:mm"
+    // NEW format:
+    // t=hh:mm to set time
+    // a=hh:mm to set alarm time
+    char input[8];
+    int charsRead = Serial.readBytes(input, 8);    // read 8 characters
+    if (charsRead == 8 && input[0] == 't' && input[4] == ':') {
+      int mm = int(input[6] - '0') + int(input[5] - '0') * 10;
+      Serial.println();
+      Serial.println("set time..");
       Serial.print("minutes: ");
       Serial.println(mm);
-      int hr = int(input[1] - '0') + int(input[0] - '0')*10; 
+      int hr = int(input[3] - '0') + int(input[2] - '0') * 10;
       Serial.print("hours: ");
       Serial.println(hr);
       RTCtime.Minutes = mm;
       RTCtime.Hours = hr;
-      M5.rtc.SetTime(&RTCtime);      
+      M5.rtc.SetTime(&RTCtime);
+    }
+    else if(charsRead == 8 && input[0] == 'a' && input[4] == ':') {
+      int mm = int(input[6] - '0') + int(input[5] - '0') * 10;
+      Serial.println();
+      Serial.println("set alarm..");
+      Serial.print("minutes: ");
+      Serial.println(mm);
+      int hr = int(input[3] - '0') + int(input[2] - '0') * 10;
+      Serial.print("hours: ");
+      Serial.println(hr);
+      AlarmTime.Minutes = mm;
+      AlarmTime.Hours = hr;
+      drawTime(&RTCtime);
+      TimePageSprite.pushSprite();
+      program_state = STATE_DEFAULT;
+      Serial.println("program_state => STATE_DEFAULT");
     }
     else {
       Serial.print("received wrong time format.. ");
       Serial.println(input);
     }
   }
-  
-  if( program_state == STATE_DEFAULT) {
-    // state behavior: check and update time every second
-    if(millis() > rtcTimer + 1000) {
+
+  // =======================================================
+  // DEFAULT STATE
+  // =======================================================
+  if ( program_state == STATE_DEFAULT) {
+    // state behavior: check and update time every 100ms
+    if (millis() > rtc_timer + 100) {
       updateTime();
-      drawTime();
-      drawTimeToAlarm();      
-      rtcTimer = millis();
-    }
-    // state behavior: read sensor and print its value to Serial port
-    if(millis() > sensorTimer + 100) {
-      sensorVal = analogRead(sensorPin);
-      brightnessVal = map(sensorVal, 0, 4095, 0, 255);
-      Serial.println(brightnessVal);
-      sensorTimer = millis();    
-    }
-    // (OPTIONAL) state behavior: change RGB LEDs green level according to sensor value:
-    for( int i=0; i<3; i++) {
-      pixels.setPixelColor(i, pixels.Color(0, brightnessVal, 0)); 
-      pixels.show(); 
-    }
-    // state transition: MID button 
-    if ( M5.BtnMID.wasPressed()) {
-      AlarmTime = RTCtime;
-      program_state = STATE_EDIT_MINUTES;
-      Serial.println("program_state => STATE_EDIT_MINUTES");
-    }
-    // state transition: alarm time equals real time clock 
-    else if(AlarmTime.Hours == RTCtime.Hours && AlarmTime.Minutes == RTCtime.Minutes) {
-      program_state = STATE_ALARM;
-      Serial.println("program_state => STATE_ALARM");
-    }
-  }
-  else if( program_state == STATE_EDIT_MINUTES) {
-    // state behavior: blink underline under alarm minutes
-    if( millis() > underlineTimer + 250 ) {
-      underlineOn = !underlineOn;
-      PageSprite.drawString(30, 20, "SET ALARM MINUTES:");
-      drawAlarmTime();      
-      if(underlineOn)
-        PageSprite.FillRect(110, 110, 80, 6, 0); // underline minutes black
-      else
-        PageSprite.FillRect(110, 110, 80, 6, 1); // underline minutes white
-      PageSprite.pushSprite();
-      underlineTimer = millis();
-    }
-    // state transition: UP button to increase alarm minutes
-    if( M5.BtnUP.wasPressed()) {
-      Serial.println("BtnUP wasPressed!");
-      if(AlarmTime.Minutes < 59) {
-        AlarmTime.Minutes++;
-        drawAlarmTime();
-      }        
-    }
-    // another state transition: DOWN button to decrease alarm minutes
-    else if( M5.BtnDOWN.wasPressed()) {
-      Serial.println("BtnDOWN wasPressed!");
-      if(AlarmTime.Minutes > 0) {
-        AlarmTime.Minutes--;
-        drawAlarmTime();
-      }        
-    }
-    // another state transition: MID button to edit alarm hour
-    else if (M5.BtnMID.wasPressed()) {
-      PageSprite.FillRect(110, 110, 80, 6, 1); // underline minutes white
-      program_state = STATE_EDIT_HOURS;
-      Serial.println("program_state => STATE_EDIT_HOURS");
-    }
-  }
-  else if(program_state == STATE_EDIT_HOURS) {
-    // state behavior: blink underline under alarm hours
-    if(millis() > underlineTimer + 250) {
-      PageSprite.drawString(30, 20, " SET ALARM HOURS: ");
-      underlineOn = !underlineOn;
-      drawAlarmTime();
-      if(underlineOn)
-        PageSprite.FillRect(10, 110, 80, 6, 0); // underline hours black
-      else
-        PageSprite.FillRect(10, 110, 80, 6, 1); // underline hours white
-      PageSprite.pushSprite();
-      underlineTimer = millis();
-    }
-    // state behavior: increase alarm hour with UP button
-    if( M5.BtnUP.wasPressed()) {
-      Serial.println("BtnUP wasPressed!");
-      if(AlarmTime.Hours < 23) {
-        AlarmTime.Hours++;
-        drawAlarmTime();
-      }        
-    }
-    // state behavior: decrease alarm hour with DOWN button 
-    else if( M5.BtnDOWN.wasPressed()) {
-      Serial.println("BtnDOWN wasPressed!");
-      if(AlarmTime.Hours > 0) {
-        AlarmTime.Hours--;
-        drawAlarmTime();
-      }        
-    }
-    // state transition: MID button to go back to default state 
-    else if (M5.BtnMID.wasPressed()) {
-      //PageSprite.FillRect(10, 110, 80, 6, 1); // underline hours white
-      M5.M5Ink.clear();
-      PageSprite.clear(CLEAR_DRAWBUFF | CLEAR_LASTBUFF);
-      M5.rtc.GetTime(&RTCtime);
-      drawTime();
       
-      program_state = STATE_DEFAULT;
-      Serial.println("program_state => STATE_DEFAULT");
-    }
-  }
-  else if( program_state == STATE_ALARM) {
-    // state behavior: check and update time every second
-    if(millis() > rtcTimer + 1000) {
-      updateTime();
-      drawTime();
-      //drawTimeToAlarm();    
-      PageSprite.drawString(45, 130, "  ALARM IS ON  ");
-      PageSprite.pushSprite();   
-      rtcTimer = millis();
-    }
-    // (OPTIONAL) state behavior: blink RGB LEDs red every 500ms
-    if(millis() > ledBlinkTimer + 500) {
-      if(ledBlinkOn) {
-        // turn all pixels red:
-        for( int i=0; i<3; i++) {
-          pixels.setPixelColor(i, pixels.Color(255, 0, 0)); 
-          pixels.show(); 
-        }
-        ledBlinkOn = false;        
+      if(AlarmTime.Hours == RTCtime.Hours 
+        && AlarmTime.Minutes == RTCtime.Minutes) {
+        resetLED();
+        program_state = STATE_ALARM;
+        Serial.println("program_state => STATE_ALARM");
       }
-      else {
-        // turn all pixels off:
-        for( int i=0; i<3; i++) {
-          pixels.setPixelColor(i, pixels.Color(0, 0, 0)); 
-          pixels.show(); 
-        }
-        ledBlinkOn = true;
+      
+      rtc_timer = millis();
+    }
+    
+    // state behavior: update led 1 & 2 & 3 every 20ms
+    if(millis() > ambient_timer + 20) {
+      if(ambientOn) {
+        ambientLED();
+      } else {
+        resetLED();
       }
-      ledBlinkTimer = millis();
+      
+      ambient_timer = millis();
     }
-    // state transition: top button press to finish alarm
-    if ( M5.BtnEXT.wasPressed()) {
-      Serial.println("BtnEXT wasPressed!");
-      M5.M5Ink.clear();
-      PageSprite.clear(CLEAR_DRAWBUFF | CLEAR_LASTBUFF);
-      program_state = STATE_ALARM_FINISHED;
-      Serial.println("program_state => STATE_ALARM_FINISHED");
+    
+  // =======================================================
+  // ALARM STATE == 1
+  // =======================================================
+  } else if (program_state == STATE_ALARM) {
+    // state behavior: check and update time every 100ms
+    if (millis() > rtc_timer + 1000) {
+      M5.Speaker.setBeep(800,500);
+      M5.Speaker.beep();
+      rtc_timer = millis();
     }
-  }
-  else if(program_state == STATE_ALARM_FINISHED) {
-    // state behavior: check and update time every second
-    if(millis() > rtcTimer + 1000) {
+    
+    // LED behavior: Blink in all LED to red color using timer:
+    if (millis() > alarm_timer + 10) { // 10 milliseconds passed
+      alarmLED();
+      alarm_timer = millis();
+    }
+    
+    // process the inputs every 100 milliseconds:
+    if (millis() > input_timer + 100) {
       updateTime();
-      drawTime();
-      PageSprite.drawString(50, 130, "ALARM IS OFF");
-      PageSprite.pushSprite();    
-      rtcTimer = millis();
+      
+      int input1Val = digitalRead(input1Pin);
+      
+      if(input1Val == LOW) {
+        resetLED();
+        program_state = STATE_REST;
+        Serial.println("program_state => STATE_REST");
+      }
+      
+      input1State = input1Val; // update input 1 state
+      input_timer = millis();
     }
-    // state transition: MID button 
-    if ( M5.BtnMID.wasPressed()) {
-      AlarmTime = RTCtime;
-      program_state = STATE_EDIT_MINUTES;
-      Serial.println("program_state => STATE_EDIT_MINUTES");
+    
+  // =======================================================
+  // REST STATE == 2
+  // =======================================================
+  } else if (program_state == STATE_REST) {
+    if (millis() > rtc_timer + 250) {
+      updateTime();
+      restLED();
+      
+      rtc_timer = millis();
     }
   }
-  
+
   M5.update();
 }
 
+void drawImageToSprite(int posX, int posY, image_t *imagePtr,
+                       Ink_Sprite *sprite) {
+  sprite->drawBuff(posX, posY, imagePtr->width, imagePtr->height,
+                   imagePtr->ptr);
+}
+
+void updateTime() {
+  M5.rtc.GetTime(&RTCtime);
+  if (minutes != RTCtime.Minutes) {
+    M5.rtc.GetTime(&RTCtime);
+
+    if (RTCtime.Minutes % 10 == 0) {
+      M5.M5Ink.clear();
+      TimePageSprite.clear(CLEAR_DRAWBUFF | CLEAR_LASTBUFF);
+    }
+    drawTime(&RTCtime);
+    TimePageSprite.pushSprite();
+    minutes = RTCtime.Minutes;
+  }
+}
+
+void drawTime(RTC_TimeTypeDef *time) {
+  drawImageToSprite(10, 48, &num55[time->Hours / 10], &TimePageSprite);
+  drawImageToSprite(50, 48, &num55[time->Hours % 10], &TimePageSprite);
+  drawImageToSprite(90, 48, &num55[10], &TimePageSprite);
+  drawImageToSprite(110, 48, &num55[time->Minutes / 10], &TimePageSprite);
+  drawImageToSprite(150, 48, &num55[time->Minutes % 10], &TimePageSprite);
+
+  char buf[8];
+  int hr_diff = AlarmTime.Hours - RTCtime.Hours;
+  if ( hr_diff < 0) {
+    hr_diff = 23 + hr_diff;
+  }
+  int min_diff = AlarmTime.Minutes - RTCtime.Minutes;
+  if ( min_diff < 0) {
+    min_diff = 59 + min_diff;
+    if ( hr_diff == 0) {
+      hr_diff = 23 + hr_diff;
+    }
+  }
+  sprintf(buf, "%02d:%02d", hr_diff, min_diff);
+  TimePageSprite.drawString(45, 130, buf);
+  TimePageSprite.drawString(95, 130, "TO ALARM");
+}
+
+void drawTimePage() {
+  M5.rtc.GetTime(&RTCtime);
+  drawTime(&RTCtime);
+  minutes = RTCtime.Minutes;
+  TimePageSprite.pushSprite();
+}
+
+
+void checkRTC() {
+  M5.rtc.GetTime(&RTCtime);
+  if (RTCtime.Seconds == RTCTimeSave.Seconds) {
+    Serial.println("RTC Error");
+    while (1) {
+      delay(10);
+      M5.update();
+    }
+  }
+}
+
+// ===========================================================
+//                  Personal Functions
+// ===========================================================
+
+void ambientLED()
+{
+  if(led1Start) {
+    if (led1Max) {
+      ambLed1Val -= 2;
+      if (ambLed1Val <= 0) {
+        ambLed1Val  = 0;
+        led1Max     = false;
+        led1Start   = false;
+      }
+    } else {
+      ambLed1Val += 2;
+      if (ambLed1Val > 75 && !led2Start)   led2Start  = true;
+      if (ambLed1Val > 150)                led1Max    = true;
+    }
+  }
+  
+  if(led2Start) {
+    if (led2Max) {
+      ambLed2Val -= 2;
+      if (ambLed2Val <= 0) {
+        ambLed2Val  = 0;
+        led2Max     = false;
+        led2Start   = false;
+      }
+    } else {
+      ambLed2Val += 2;
+      if (ambLed2Val > 75 && !led3Start)   led3Start  = true;
+      if (ambLed2Val > 150)                led2Max    = true;
+    }
+  }
+  
+  if(led3Start) {
+    if (led3Max) {
+      ambLed3Val -= 2;
+      if (ambLed3Val <= 0) {
+        ambLed3Val  = 0;
+        led3Max     = false;
+        led3Start   = false;
+        led1Start   = true;
+      }
+    } else {
+      ambLed3Val += 2;
+      if (ambLed3Val > 150)               led3Max    = true;
+    }
+  }
+  
+  pixels.setPixelColor(0, pixels.Color(0, 0, ambLed1Val));
+  pixels.setPixelColor(1, pixels.Color(0, 0, ambLed2Val));
+  pixels.setPixelColor(2, pixels.Color(0, 0, ambLed3Val));
+
+  pixels.show();
+}
+
+void alarmLED()
+{
+  if (!alarmMax) {
+    armLedVal += 10;    // increase LEDs brightness value
+    if (armLedVal > 255) alarmMax = true;
+  } else {              // decrease LEDs brightness value
+    armLedVal -= 10;
+    if (armLedVal <= 0)  alarmMax = false;
+  }
+      
+  pixels.setPixelColor(0, pixels.Color(armLedVal, 0, 0));
+  pixels.setPixelColor(1, pixels.Color(armLedVal, 0, 0));
+  pixels.setPixelColor(2, pixels.Color(armLedVal, 0, 0));
+      
+  pixels.show();                  // update RGB LED Unit
+}
+
+void restLED()
+{
+  pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+  pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+  pixels.setPixelColor(2, pixels.Color(0, 100, 0));
+  
+  pixels.show();                  // update RGB LED Unit
+}
+
+// Reset the LED Colors to None
+void resetLED()
+{
+  pixels.setPixelColor(0, pixels.Color(0, 0, 0));
+  pixels.setPixelColor(1, pixels.Color(0, 0, 0));
+  pixels.setPixelColor(2, pixels.Color(0, 0, 0));
+  
+  pixels.show();                  // update RGB LED Unit
+}
